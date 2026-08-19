@@ -14,6 +14,9 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --no-dev
 
+# O README entra junto com o codigo, nao com as dependencias: o pyproject o
+# declara como readme e o hatchling le o arquivo ao instalar o projeto.
+COPY README.md ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
