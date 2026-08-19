@@ -4,7 +4,7 @@ Chat que responde perguntas sobre a documentacao do FastAPI sem inventar: toda
 afirmacao da resposta vem de um trecho recuperado e cita a fonte. Quando o
 acervo nao sustenta a resposta, o sistema diz que nao encontrou.
 
-> Em construcao. **Fase 1 (fundacao) concluida.** O README completo — diagrama
+> Em construcao. **Fases 1 (fundacao) e 2 (ingestao) concluidas.** O README completo — diagrama
 > de arquitetura, metricas antes/depois e a secao "onde ele falha" — sai na
 > Fase 7.
 
@@ -47,12 +47,52 @@ uv run python -m rag_docs.migrate    # aplica as migracoes (idempotente)
 uv run uvicorn rag_docs.main:app --reload
 ```
 
+## Ingestao
+
+```bash
+uv run python -m rag_docs.ingest --dry-run   # inspeciona o corpus sem gastar credito
+uv run python -m rag_docs.ingest             # coleta, fatia, embeda e grava
+```
+
+Rodar duas vezes nao duplica: o upsert usa a chave natural
+`(documento_url, posicao)` e os `id` sobrevivem. Se um documento encolheu entre
+duas ingestoes, os chunks excedentes da versao anterior sao removidos na mesma
+transacao -- sem isso eles ficariam recuperaveis para sempre.
+
+Flags uteis: `--limit N` (processa so os N primeiros documentos), `--ref`
+(branch ou tag das docs), `--incluir-tudo` (nao filtra release-notes nem
+paginas auxiliares).
+
+### O que o pipeline faz com o markdown
+
+As docs do FastAPI tem tres construcoes que precisam de tratamento antes do
+chunking:
+
+| Construcao | Ocorrencias | Tratamento |
+| --- | --- | --- |
+| `{* ../../docs_src/x.py ln[15:17] *}` | 440 | codigo real inserido como bloco cercado |
+| `/// note`, `//// tab` | 480 | convertidos em prosa |
+| `## Titulo { #slug }` | 1102 | anchor vira o fragmento da URL de citacao |
+
+O caminho do include e relativo ao diretorio do `mkdocs.yml` (`docs/en`), nao ao
+arquivo que o contem.
+
+Nao entram no acervo: `release-notes.md` (710 KB de changelog, 47% do corpus em
+bytes), `translation-banner.md` (fragmento, nao pagina) e arquivos com prefixo
+`_` (excluidos pelo proprio MkDocs).
+
+Corpus resultante: **151 documentos, 1435 chunks**, mediana de 707 caracteres,
+95% com anchor de secao.
+
 Qualidade:
 
 ```bash
 uv run ruff check . && uv run ruff format --check .
 uv run mypy
 uv run pytest
+
+# Testes de integracao contra Postgres real (pulados sem a variavel):
+RAG_TEST_DATABASE_URL=postgresql://rag:...@localhost:5432/rag uv run pytest
 ```
 
 ## Estrutura
@@ -65,8 +105,16 @@ src/rag_docs/
   main.py            app FastAPI + /health
   models.py          schemas Pydantic v2
   observability.py   cliente Langfuse (no-op sem chaves)
+  embeddings.py      UNICO ponto de contato com o modelo de embedding
+  ingest/
+    coleta.py        clone das docs + resolucao da URL publica
+    parsing.py       includes de codigo, blocos ///, anchors
+    chunking.py      corte nos cabecalhos + trilha de titulos
+    gravacao.py      upsert idempotente + limpeza de orfaos
+    cli.py           python -m rag_docs.ingest
 migrations/
   001_init.sql       tabela chunks, indice HNSW e indice GIN
+  002_documento_url.sql  chave natural (documento_url, posicao)
 ```
 
 ## Esquema
@@ -82,15 +130,18 @@ Uma tabela, `chunks`:
 | `posicao`   | `integer`      | ordem do chunk no documento                                  |
 | `embedding` | `vector(1536)` | `text-embedding-3-small`                                     |
 | `tsv`       | `tsvector`     | coluna **gerada** a partir de `texto`                        |
+| `documento_url` | `text`     | URL da pagina sem anchor; identidade do documento pai         |
 
 Indices: HNSW `vector_cosine_ops` sobre `embedding`, GIN sobre `tsv`.
-Chave natural `UNIQUE (url, posicao)` — e o que sustenta a ingestao idempotente
-da Fase 2 e mantem os `id` estaveis para os evals da Fase 4.
+Chave natural `UNIQUE (documento_url, posicao)` — e o que sustenta a ingestao
+idempotente e mantem os `id` estaveis para os evals da Fase 4. `url` carrega o
+anchor da secao (`.../custom-response/#html-response`) para a citacao apontar o
+ponto exato.
 
 ## Fases
 
 - [x] **1 — Fundacao.** Projeto, compose, migracoes, `/health`, Dockerfile.
-- [ ] **2 — Ingestao.** CLI: coleta → parsing → chunking → embeddings → gravacao.
+- [x] **2 — Ingestao.** CLI: coleta → parsing → chunking → embeddings → gravacao.
 - [ ] **3 — Consulta ingenua.** Densa, top-5, instrumentada no Langfuse.
 - [ ] **4 — Avaliacao.** `evals/golden.jsonl`, recall@5 e MRR via pytest.
 - [ ] **5 — Recuperacao hibrida.** BM25 + RRF + rerank, comparado com a Fase 3.
