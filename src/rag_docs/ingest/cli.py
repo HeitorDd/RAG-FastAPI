@@ -66,6 +66,16 @@ def _relatorio_chunks(chunks: list[Chunk]) -> str:
 
 async def executar(args: argparse.Namespace) -> int:
     """Roda o pipeline inteiro e devolve o codigo de saida."""
+    # Checa a chave antes de clonar e fatiar: falhar depois de um minuto de
+    # trabalho por uma variavel de ambiente vazia e desperdicio evitavel.
+    if not args.dry_run and not get_settings().openai_api_key:
+        print(
+            "OPENAI_API_KEY ausente. Preencha o .env, ou use --dry-run para "
+            "inspecionar o corpus sem embedar.",
+            file=sys.stderr,
+        )
+        return 1
+
     destino: Path = args.dest
     sha = clonar_ou_atualizar(destino, repo=args.repo, ref=args.ref)
 
